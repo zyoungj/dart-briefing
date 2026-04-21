@@ -2,95 +2,76 @@ require('dotenv').config();
 
 const express = require('express');
 const axios = require('axios');
-const AdmZip = require('adm-zip');
-const xml2js = require('xml2js');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DART_API_KEY = process.env.DART_API_KEY;
+const ACTION_API_KEY = process.env.ACTION_API_KEY;
 
-// 홈 화면
-app.get('/', (req, res) => {
-  res.send('DART 브리핑 서버가 실행 중입니다.');
-});
+// corpCodes.json 불러오기
+const corpCodesPath = path.join(__dirname, 'corpCodes.json');
+const corpCodes = JSON.parse(fs.readFileSync(corpCodesPath, 'utf8'));
 
-// 1) corpCode.xml ZIP 다운로드
-async function downloadCorpCodeZip() {
-  const url = `https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=${DART_API_KEY}`;
+// 인증 체크
+function checkActionApiKey(req, res, next) {
+  const auth = req.headers.authorization;
 
-  const response = await axios.get(url, {
-    responseType: 'arraybuffer'
-  });
-
-  return response.data;
-}
-
-// 2) ZIP 안의 XML 꺼내기
-function extractXmlFromZip(zipBuffer) {
-  const zip = new AdmZip(zipBuffer);
-  const zipEntries = zip.getEntries();
-
-  if (zipEntries.length === 0) {
-    throw new Error('ZIP 안에 파일이 없습니다.');
+  // 브라우저에서 직접 테스트할 때는 인증 없이 허용
+  if (!ACTION_API_KEY) {
+    return next();
   }
 
-  // 보통 첫 번째 파일이 CORPCODE.xml 입니다.
-  const xmlText = zipEntries[0].getData().toString('utf8');
-  return xmlText;
+  if (!auth) {
+    return next();
+  }
+
+  if (auth === `Bearer ${ACTION_API_KEY}`) {
+    return next();
+  }
+
+  return res.status(401).json({ error: 'Unauthorized' });
 }
 
-// 3) XML을 JSON처럼 바꾸기
-async function parseCorpCodeXml(xmlText) {
-  const parser = new xml2js.Parser({
-    explicitArray: false,
-    trim: true
-  });
-
-  const result = await parser.parseStringPromise(xmlText);
-  return result;
+// 숫자 문자열을 숫자로 변환
+function parseAmount(value) {
+  if (!value) return null;
+  const num = Number(String(value).replace(/,/g, ''));
+  return Number.isNaN(num) ? null : num;
 }
 
-// 4) 회사명으로 corp_code 찾기
-function findCorpCodeByName(parsedXml, companyName) {
-  const list = parsedXml.result.list;
+// 증감률 계산
+function calcChangeRate(current, previous) {
+  if (current === null || previous === null || previous === 0) return null;
+  return ((current - previous) / Math.abs(previous)) * 100;
+}
 
-  // list가 1개면 배열이 아닐 수도 있으니 배열 처리
-  const companyList = Array.isArray(list) ? list : [list];
+// 회사명으로 corp_code 찾기
+function findCorpCodeByName(companyName) {
+  let found = corpCodes.find(item => item.corp_name === companyName);
 
-  // 정확히 일치하는 회사를 먼저 찾기
-  let found = companyList.find(
-    (item) => item.corp_name === companyName
-  );
-
-  // 없으면 부분 일치로 한 번 더 찾기
   if (!found) {
-    found = companyList.find(
-      (item) => item.corp_name && item.corp_name.includes(companyName)
+    found = corpCodes.find(
+      item => item.corp_name && item.corp_name.includes(companyName)
     );
   }
 
   return found || null;
 }
 
-
-
-// 회사명으로 corp_code 찾아주는 공통 함수
+// 회사명으로 회사 정보 찾기
 async function getCorpInfoByName(companyName) {
-  const zipBuffer = await downloadCorpCodeZip();
-  const xmlText = extractXmlFromZip(zipBuffer);
-  const parsedXml = await parseCorpCodeXml(xmlText);
-  const foundCompany = findCorpCodeByName(parsedXml, companyName);
+  const foundCompany = findCorpCodeByName(companyName);
 
   if (!foundCompany) {
-    throw new Error('해당 회사명을 DART corpCode 목록에서 찾지 못했습니다.');
+    throw new Error('해당 회사명을 corpCodes.json에서 찾지 못했습니다.');
   }
 
   return foundCompany;
 }
 
-
-
-// 5) corp_code로 회사 기본정보 조회
+// 기업 기본정보 조회
 async function getCompanyInfo(corpCode) {
   const url = 'https://opendart.fss.or.kr/api/company.json';
 
@@ -103,184 +84,6 @@ async function getCompanyInfo(corpCode) {
 
   return response.data;
 }
-
-// 회사명으로 기업개황 조회
-app.get('/company', async (req, res) => {
-  const companyName = req.query.name;
-
-  if (!companyName) {
-    return res.status(400).json({
-      error: '회사명을 입력해주세요. 예: /company?name=삼성전자'
-    });
-  }
-
-  try {
-    // A. corpCode.xml ZIP 다운로드
-    const zipBuffer = await downloadCorpCodeZip();
-
-    // B. ZIP에서 XML 추출
-    const xmlText = extractXmlFromZip(zipBuffer);
-
-    // C. XML 파싱
-    const parsedXml = await parseCorpCodeXml(xmlText);
-
-    // D. 회사명으로 corp_code 찾기
-    const foundCompany = findCorpCodeByName(parsedXml, companyName);
-
-    if (!foundCompany) {
-      return res.status(404).json({
-        error: '해당 회사명을 DART corpCode 목록에서 찾지 못했습니다.',
-        companyName: companyName
-      });
-    }
-
-    // E. 기업개황 조회
-    const companyInfo = await getCompanyInfo(foundCompany.corp_code);
-
-    // F. 보기 쉽게 정리해서 반환
-    res.json({
-      searchName: companyName,
-      matchedCompanyName: foundCompany.corp_name,
-      corpCode: foundCompany.corp_code,
-      stockCode: foundCompany.stock_code,
-      modifyDate: foundCompany.modify_date,
-      companyInfo: {
-        corp_name: companyInfo.corp_name,
-        corp_name_eng: companyInfo.corp_name_eng,
-        stock_name: companyInfo.stock_name,
-        stock_code: companyInfo.stock_code,
-        ceo_nm: companyInfo.ceo_nm,
-        corp_cls: companyInfo.corp_cls,
-        jurir_no: companyInfo.jurir_no,
-        bizr_no: companyInfo.bizr_no,
-        adres: companyInfo.adres,
-        hm_url: companyInfo.hm_url,
-        ir_url: companyInfo.ir_url,
-        phn_no: companyInfo.phn_no,
-        fax_no: companyInfo.fax_no,
-        induty_code: companyInfo.induty_code,
-        est_dt: companyInfo.est_dt,
-        acc_mt: companyInfo.acc_mt
-      }
-    });
-  } catch (error) {
-    console.error(error);
-
-    res.status(500).json({
-      error: '처리 중 오류가 발생했습니다.',
-      detail: error.message
-    });
-  }
-});
-
-
-// 최근 공시 목록 조회
-app.get('/disclosures', async (req, res) => {
-  const companyName = req.query.name;
-
-  if (!companyName) {
-    return res.status(400).json({
-      error: '회사명을 입력해주세요. 예: /disclosures?name=삼성전자'
-    });
-  }
-
-  try {
-    const foundCompany = await getCorpInfoByName(companyName);
-
-    // 오늘 날짜 기준으로 최근 1년
-    const today = new Date();
-    const endDate = today.toISOString().slice(0, 10).replace(/-/g, '');
-    const oneYearAgo = new Date();
-    oneYearAgo.setFullYear(today.getFullYear() - 1);
-    const beginDate = oneYearAgo.toISOString().slice(0, 10).replace(/-/g, '');
-
-    const url = 'https://opendart.fss.or.kr/api/list.json';
-
-    const response = await axios.get(url, {
-      params: {
-        crtfc_key: DART_API_KEY,
-        corp_code: foundCompany.corp_code,
-        bgn_de: beginDate,
-        end_de: endDate,
-        page_count: 10
-      }
-    });
-
-    res.json({
-      searchName: companyName,
-      matchedCompanyName: foundCompany.corp_name,
-      corpCode: foundCompany.corp_code,
-      disclosures: response.data.list || [],
-      status: response.data.status,
-      message: response.data.message
-    });
-  } catch (error) {
-    console.error(error);
-
-    res.status(500).json({
-      error: '최근 공시 목록 조회 중 오류가 발생했습니다.',
-      detail: error.message
-    });
-  }
-});
-
-
-
-// 재무 주요계정 조회
-app.get('/finance', async (req, res) => {
-  const companyName = req.query.name;
-  const year = req.query.year || '2025';
-  const report = req.query.report || '11011'; 
-  // 11011: 사업보고서, 11012: 반기보고서, 11013: 1분기보고서, 11014: 3분기보고서
-
-  if (!companyName) {
-    return res.status(400).json({
-      error: '회사명을 입력해주세요. 예: /finance?name=삼성전자&year=2025&report=11011'
-    });
-  }
-
-  try {
-    const foundCompany = await getCorpInfoByName(companyName);
-
-    const url = 'https://opendart.fss.or.kr/api/fnlttSinglAcnt.json';
-
-    const response = await axios.get(url, {
-      params: {
-        crtfc_key: DART_API_KEY,
-        corp_code: foundCompany.corp_code,
-        bsns_year: year,
-        reprt_code: report
-      }
-    });
-
-    const list = response.data.list || [];
-
-    // 영업에 자주 보는 핵심 계정만 먼저 추리기
-    const keywords = ['매출액', '영업이익', '당기순이익'];
-    const summary = list.filter(item =>
-      keywords.includes(item.account_nm)
-    );
-
-    res.json({
-      searchName: companyName,
-      matchedCompanyName: foundCompany.corp_name,
-      corpCode: foundCompany.corp_code,
-      year: year,
-      report: report,
-      summary: summary,
-      rawCount: list.length,
-      status: response.data.status,
-      message: response.data.message
-    });
-  } catch (error) {
-    console.error(error);
-
-    res.status(500).json({
-      error: '재무 주요계정 조회 중 오류가 발생했습니다.',
-      detail: error.message
-    });
-  }
-});
 
 // 최근 공시 가져오기
 async function getRecentDisclosures(corpCode) {
@@ -299,7 +102,7 @@ async function getRecentDisclosures(corpCode) {
       corp_code: corpCode,
       bgn_de: beginDate,
       end_de: endDate,
-      page_count: 5
+      page_count: 10
     }
   });
 
@@ -320,97 +123,17 @@ async function getFinanceSummary(corpCode, year = '2025', report = '11011') {
   });
 
   const list = response.data.list || [];
-
   const wantedAccounts = ['매출액', '영업이익', '당기순이익'];
+
   return list.filter(item => wantedAccounts.includes(item.account_nm));
 }
 
-
-
-// 기업 브리핑 통합 조회
-app.get('/briefing', async (req, res) => {
-  const companyName = req.query.name;
-  const year = req.query.year || '2025';
-  const report = req.query.report || '11011';
-
-  if (!companyName) {
-    return res.status(400).json({
-      error: '회사명을 입력해주세요. 예: /briefing?name=삼성전자'
-    });
-  }
-
-  try {
-    // 1. 회사명으로 corp_code 찾기
-    const foundCompany = await getCorpInfoByName(companyName);
-
-    // 2. 회사 기본정보
-    const companyInfo = await getCompanyInfo(foundCompany.corp_code);
-
-    // 3. 최근 공시
-    const disclosures = await getRecentDisclosures(foundCompany.corp_code);
-
-    // 4. 재무 요약
-    const finance = await getFinanceSummary(foundCompany.corp_code, year, report);
-
-    // 5. 보기 쉽게 정리
-    res.json({
-      company: {
-        searchName: companyName,
-        matchedCompanyName: foundCompany.corp_name,
-        corpCode: foundCompany.corp_code,
-        stockCode: foundCompany.stock_code,
-        ceo: companyInfo.ceo_nm,
-        address: companyInfo.adres,
-        homepage: companyInfo.hm_url,
-        irPage: companyInfo.ir_url,
-        establishedDate: companyInfo.est_dt,
-        fiscalMonth: companyInfo.acc_mt
-      },
-      finance: finance.map(item => ({
-        accountName: item.account_nm,
-        currentAmount: item.thstrm_amount,
-        previousAmount: item.frmtrm_amount,
-        currency: item.currency
-      })),
-      recentDisclosures: disclosures.map(item => ({
-        date: item.rcept_dt,
-        reportName: item.report_nm,
-        receiptNo: item.rcept_no
-      })),
-      comment: '여기까지 되면 기업개요 + 최근공시 + 재무요약을 한 번에 조회하는 기본 브리핑이 완성된 상태입니다.'
-    });
-
-  } catch (error) {
-    console.error(error);
-
-    res.status(500).json({
-      error: '브리핑 조회 중 오류가 발생했습니다.',
-      detail: error.message
-    });
-  }
-});
-
-// 숫자 문자열을 숫자로 바꾸는 함수
-function parseAmount(value) {
-  if (!value) return null;
-  const num = Number(String(value).replace(/,/g, ''));
-  return Number.isNaN(num) ? null : num;
-}
-
-// 증감률 계산
-function calcChangeRate(current, previous) {
-  if (current === null || previous === null || previous === 0) return null;
-  return ((current - previous) / Math.abs(previous)) * 100;
-}
-
-// 재무 요약을 보기 쉽게 정리
+// 재무 신호 만들기
 function buildFinanceSignals(financeList) {
   const result = [];
 
   financeList.forEach(item => {
     const accountName = item.account_nm;
-
-    // 손익계산서 계정은 누적금액을 우선 사용
     const current = parseAmount(item.thstrm_add_amount || item.thstrm_amount);
     const previous = parseAmount(item.frmtrm_add_amount || item.frmtrm_amount);
     const changeRate = calcChangeRate(current, previous);
@@ -425,11 +148,8 @@ function buildFinanceSignals(financeList) {
     let specialNote = '';
     if (accountName === '영업이익' || accountName === '당기순이익') {
       if (current !== null && previous !== null) {
-        if (previous < 0 && current > 0) {
-          specialNote = '흑자전환';
-        } else if (previous > 0 && current < 0) {
-          specialNote = '적자전환';
-        }
+        if (previous < 0 && current > 0) specialNote = '흑자전환';
+        else if (previous > 0 && current < 0) specialNote = '적자전환';
       }
     }
 
@@ -446,7 +166,7 @@ function buildFinanceSignals(financeList) {
   return result;
 }
 
-// 최근 공시 중 중요 키워드만 선별
+// 중요 공시만 선별
 function pickImportantDisclosures(disclosures) {
   const keywords = [
     '대표이사',
@@ -471,11 +191,10 @@ function pickImportantDisclosures(disclosures) {
   });
 }
 
-// IT영업 관점의 간단 코멘트 생성
+// 영업 힌트 만들기
 function buildSalesHints(financeSignals, importantDisclosures) {
   const hints = [];
 
-  // 재무 신호
   const sales = financeSignals.find(item => item.accountName === '매출액');
   const op = financeSignals.find(item => item.accountName === '영업이익');
 
@@ -491,7 +210,6 @@ function buildSalesHints(financeSignals, importantDisclosures) {
     hints.push('수익성 개선 신호가 있어 중장기 IT투자 재개 가능성을 함께 볼 수 있습니다.');
   }
 
-  // 공시 신호
   const reportNames = importantDisclosures.map(item => item.report_nm || '');
 
   if (reportNames.some(name => name.includes('신규시설투자') || name.includes('공장'))) {
@@ -521,73 +239,7 @@ function buildSalesHints(financeSignals, importantDisclosures) {
   return hints;
 }
 
-
-
-// 변화 신호 요약
-app.get('/signals', async (req, res) => {
-  const companyName = req.query.name;
-  const year = req.query.year || '2025';
-  const report = req.query.report || '11011';
-
-  if (!companyName) {
-    return res.status(400).json({
-      error: '회사명을 입력해주세요. 예: /signals?name=삼성전자'
-    });
-  }
-
-  try {
-    // 1. 회사 찾기
-    const foundCompany = await getCorpInfoByName(companyName);
-
-    // 2. 회사 기본정보
-    const companyInfo = await getCompanyInfo(foundCompany.corp_code);
-
-    // 3. 최근 공시 1년치
-    const disclosures = await getRecentDisclosures(foundCompany.corp_code);
-
-    // 4. 재무 요약
-    const finance = await getFinanceSummary(foundCompany.corp_code, year, report);
-
-    // 5. 변화 신호 만들기
-    const financeSignals = buildFinanceSignals(finance);
-    const importantDisclosures = pickImportantDisclosures(disclosures);
-    const salesHints = buildSalesHints(financeSignals, importantDisclosures);
-
-    res.json({
-      company: {
-        searchName: companyName,
-        matchedCompanyName: foundCompany.corp_name,
-        corpCode: foundCompany.corp_code,
-        stockCode: foundCompany.stock_code,
-        ceo: companyInfo.ceo_nm,
-        address: companyInfo.adres
-      },
-      financeSignals,
-      importantDisclosures: importantDisclosures.map(item => ({
-        date: item.rcept_dt,
-        reportName: item.report_nm,
-        receiptNo: item.rcept_no
-      })),
-      salesHints
-    });
-
-  } catch (error) {
-    console.error(error);
-
-    res.status(500).json({
-      error: '변화 신호 조회 중 오류가 발생했습니다.',
-      detail: error.message
-    });
-  }
-});
-
-
-function formatNumber(num) {
-  if (num === null) return '확인 필요';
-  return Number(num).toLocaleString();
-}
-
-
+// 문장형 요약
 function buildFinanceSentence(financeSignals) {
   let sentences = [];
 
@@ -611,9 +263,6 @@ function buildFinanceSentence(financeSignals) {
   return sentences.join(' ');
 }
 
-
-
-
 function buildDisclosureSentence(disclosures) {
   if (!disclosures || disclosures.length === 0) {
     return '최근 공시에서 뚜렷한 주요 이벤트는 제한적이다.';
@@ -625,8 +274,6 @@ function buildDisclosureSentence(disclosures) {
 
   return lines.join('\n');
 }
-
-
 
 function buildSummaryText(data) {
   const { company, financeSignals, importantDisclosures, salesHints } = data;
@@ -648,10 +295,224 @@ ${salesHints.map(h => `- ${h}`).join('\n')}
 `;
 }
 
+// 기본 페이지
+app.get('/', (req, res) => {
+  res.send('DART 브리핑 서버가 실행 중입니다.');
+});
 
+// company
+app.get('/company', checkActionApiKey, async (req, res) => {
+  const companyName = req.query.name;
 
-// 문장형 브리핑
-app.get('/summary', async (req, res) => {
+  if (!companyName) {
+    return res.status(400).json({
+      error: '회사명을 입력해주세요. 예: /company?name=삼성전자'
+    });
+  }
+
+  try {
+    const foundCompany = await getCorpInfoByName(companyName);
+    const companyInfo = await getCompanyInfo(foundCompany.corp_code);
+
+    res.json({
+      searchName: companyName,
+      matchedCompanyName: foundCompany.corp_name,
+      corpCode: foundCompany.corp_code,
+      stockCode: foundCompany.stock_code,
+      modifyDate: foundCompany.modify_date,
+      companyInfo: {
+        corp_name: companyInfo.corp_name,
+        corp_name_eng: companyInfo.corp_name_eng,
+        stock_name: companyInfo.stock_name,
+        stock_code: companyInfo.stock_code,
+        ceo_nm: companyInfo.ceo_nm,
+        corp_cls: companyInfo.corp_cls,
+        jurir_no: companyInfo.jurir_no,
+        bizr_no: companyInfo.bizr_no,
+        adres: companyInfo.adres,
+        hm_url: companyInfo.hm_url,
+        ir_url: companyInfo.ir_url,
+        phn_no: companyInfo.phn_no,
+        fax_no: companyInfo.fax_no,
+        induty_code: companyInfo.induty_code,
+        est_dt: companyInfo.est_dt,
+        acc_mt: companyInfo.acc_mt
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      error: '회사 정보 조회 중 오류가 발생했습니다.',
+      detail: error.message
+    });
+  }
+});
+
+// disclosures
+app.get('/disclosures', checkActionApiKey, async (req, res) => {
+  const companyName = req.query.name;
+
+  if (!companyName) {
+    return res.status(400).json({
+      error: '회사명을 입력해주세요. 예: /disclosures?name=삼성전자'
+    });
+  }
+
+  try {
+    const foundCompany = await getCorpInfoByName(companyName);
+    const disclosures = await getRecentDisclosures(foundCompany.corp_code);
+
+    res.json({
+      searchName: companyName,
+      matchedCompanyName: foundCompany.corp_name,
+      corpCode: foundCompany.corp_code,
+      disclosures
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      error: '최근 공시 목록 조회 중 오류가 발생했습니다.',
+      detail: error.message
+    });
+  }
+});
+
+// finance
+app.get('/finance', checkActionApiKey, async (req, res) => {
+  const companyName = req.query.name;
+  const year = req.query.year || '2025';
+  const report = req.query.report || '11011';
+
+  if (!companyName) {
+    return res.status(400).json({
+      error: '회사명을 입력해주세요. 예: /finance?name=삼성전자&year=2025&report=11011'
+    });
+  }
+
+  try {
+    const foundCompany = await getCorpInfoByName(companyName);
+    const finance = await getFinanceSummary(foundCompany.corp_code, year, report);
+
+    res.json({
+      searchName: companyName,
+      matchedCompanyName: foundCompany.corp_name,
+      corpCode: foundCompany.corp_code,
+      year,
+      report,
+      summary: finance
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      error: '재무 주요계정 조회 중 오류가 발생했습니다.',
+      detail: error.message
+    });
+  }
+});
+
+// briefing
+app.get('/briefing', checkActionApiKey, async (req, res) => {
+  const companyName = req.query.name;
+  const year = req.query.year || '2025';
+  const report = req.query.report || '11011';
+
+  if (!companyName) {
+    return res.status(400).json({
+      error: '회사명을 입력해주세요. 예: /briefing?name=삼성전자'
+    });
+  }
+
+  try {
+    const foundCompany = await getCorpInfoByName(companyName);
+    const companyInfo = await getCompanyInfo(foundCompany.corp_code);
+    const disclosures = await getRecentDisclosures(foundCompany.corp_code);
+    const finance = await getFinanceSummary(foundCompany.corp_code, year, report);
+
+    res.json({
+      company: {
+        searchName: companyName,
+        matchedCompanyName: foundCompany.corp_name,
+        corpCode: foundCompany.corp_code,
+        stockCode: foundCompany.stock_code,
+        ceo: companyInfo.ceo_nm,
+        address: companyInfo.adres,
+        homepage: companyInfo.hm_url,
+        irPage: companyInfo.ir_url,
+        establishedDate: companyInfo.est_dt,
+        fiscalMonth: companyInfo.acc_mt
+      },
+      finance: finance.map(item => ({
+        accountName: item.account_nm,
+        currentAmount: item.thstrm_amount,
+        previousAmount: item.frmtrm_amount,
+        currency: item.currency
+      })),
+      recentDisclosures: disclosures.map(item => ({
+        date: item.rcept_dt,
+        reportName: item.report_nm,
+        receiptNo: item.rcept_no
+      })),
+      comment: '기업개요 + 최근공시 + 재무요약 통합 결과입니다.'
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      error: '브리핑 조회 중 오류가 발생했습니다.',
+      detail: error.message
+    });
+  }
+});
+
+// signals
+app.get('/signals', checkActionApiKey, async (req, res) => {
+  const companyName = req.query.name;
+  const year = req.query.year || '2025';
+  const report = req.query.report || '11011';
+
+  if (!companyName) {
+    return res.status(400).json({
+      error: '회사명을 입력해주세요. 예: /signals?name=삼성전자'
+    });
+  }
+
+  try {
+    const foundCompany = await getCorpInfoByName(companyName);
+    const companyInfo = await getCompanyInfo(foundCompany.corp_code);
+    const disclosures = await getRecentDisclosures(foundCompany.corp_code);
+    const finance = await getFinanceSummary(foundCompany.corp_code, year, report);
+
+    const financeSignals = buildFinanceSignals(finance);
+    const importantDisclosures = pickImportantDisclosures(disclosures);
+    const salesHints = buildSalesHints(financeSignals, importantDisclosures);
+
+    res.json({
+      company: {
+        searchName: companyName,
+        matchedCompanyName: foundCompany.corp_name,
+        corpCode: foundCompany.corp_code,
+        stockCode: foundCompany.stock_code,
+        ceo: companyInfo.ceo_nm,
+        address: companyInfo.adres
+      },
+      financeSignals,
+      importantDisclosures: importantDisclosures.map(item => ({
+        date: item.rcept_dt,
+        reportName: item.report_nm,
+        receiptNo: item.rcept_no
+      })),
+      salesHints
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      error: '변화 신호 조회 중 오류가 발생했습니다.',
+      detail: error.message
+    });
+  }
+});
+
+// summary
+app.get('/summary', checkActionApiKey, async (req, res) => {
   const companyName = req.query.name;
   const year = req.query.year || '2025';
   const report = req.query.report || '11011';
@@ -661,7 +522,6 @@ app.get('/summary', async (req, res) => {
   }
 
   try {
-    // 기존 로직 그대로 재사용
     const foundCompany = await getCorpInfoByName(companyName);
     const companyInfo = await getCompanyInfo(foundCompany.corp_code);
     const disclosures = await getRecentDisclosures(foundCompany.corp_code);
@@ -683,14 +543,11 @@ app.get('/summary', async (req, res) => {
     });
 
     res.send(summaryText);
-
   } catch (error) {
     console.error(error);
-    res.status(500).send('브리핑 생성 중 오류 발생');
+    res.status(500).send(`브리핑 생성 중 오류 발생: ${error.message}`);
   }
 });
-
-
 
 app.listen(PORT, () => {
   console.log(`서버 실행 주소: http://localhost:${PORT}`);
