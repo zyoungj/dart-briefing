@@ -949,3 +949,116 @@ const whiskies = [
       "과일",
       "오크"
     ],
+    "character": "여러 몰트와 그레인 원액을 조합해 균형과 일관성을 추구하는 블렌디드 위스키입니다.",
+    "origin": "브랜드명 “Hibiki”의 정확한 어원은 제품 또는 증류소별 공식 자료에서 확인할 수 있습니다.",
+    "history": "Hibiki은(는) 위키피디아의 위스키 브랜드·증류소 목록에 등재된 브랜드입니다. 설립 시기와 소유 구조는 시대에 따라 달라질 수 있습니다.",
+    "culture": "영화·문학·미술 등 문화예술과의 구체적 연관 사례는 브랜드 및 작품별로 확인이 필요합니다.",
+    "variants": [
+      [
+        "대표 제품",
+        "연산·캐스크·배치별 다양한 제품이 존재합니다."
+      ]
+    ],
+    "years": [
+      "NAS",
+      "숙성 연수 제품",
+      "한정판·캐스크 제품"
+    ]
+  }
+  
+];
+
+let currentView = "all";
+const tasted = JSON.parse(localStorage.getItem("whiskyTasted") || "{}");
+
+function uniq(key){ return [...new Set(whiskies.map(w=>w[key]))].sort(); }
+function fillSelect(id,key){
+ const el=document.getElementById(id);
+ uniq(key).forEach(v=>el.insertAdjacentHTML("beforeend",`<option>${v}</option>`));
+}
+fillSelect("type","type"); fillSelect("country","country"); fillSelect("region","region");
+
+document.querySelectorAll(".chip").forEach(b=>b.onclick=()=>{
+ document.querySelectorAll(".chip").forEach(x=>x.classList.remove("active"));
+ b.classList.add("active"); currentView=b.dataset.view; render();
+});
+document.getElementById("keyword").addEventListener("keydown",e=>{if(e.key==="Enter")render()});
+
+function bottleLabel(name){
+ const short=name.replace("The ","").split(" ").slice(0,2).join("<br>");
+ return `<div class="bottle"><div class="label">${short}</div></div>`;
+}
+function filtered(){
+ const type=document.getElementById("type").value;
+ const country=document.getElementById("country").value;
+ const region=document.getElementById("region").value;
+ const q=document.getElementById("keyword").value.trim().toLowerCase();
+ return whiskies.filter(w =>
+  (!type||w.type===type)&&(!country||w.country===country)&&(!region||w.region===region)&&
+  (!q || [w.name,w.type,w.country,w.region,...w.notes].join(" ").toLowerCase().includes(q)) &&
+  (currentView==="all" || (currentView==="tasted" && tasted[w.id]) || (currentView==="untasted" && !tasted[w.id]))
+ );
+}
+function render(){
+ const arr=filtered();
+ document.getElementById("resultText").textContent=`총 ${arr.length}개의 위스키`;
+ document.getElementById("allCount").textContent=whiskies.length;
+ document.getElementById("tastedCount").textContent=Object.values(tasted).filter(Boolean).length;
+ document.getElementById("list").innerHTML=arr.length?arr.map(w=>`
+ <article class="card" onclick="openDetail('${w.id}')">
+   <div class="visual">
+     <div class="tasted ${tasted[w.id]?'yes':''}" title="${tasted[w.id]?'마셔봄':'아직 안 마셔봄'}">${tasted[w.id]?'✓':'○'}</div>
+     <div class="badge">${w.type}</div>
+     ${bottleLabel(w.name)}
+   </div>
+   <div class="card-body">
+     <h3>${w.name}</h3>
+     <div class="meta">${w.country} · ${w.region} · ${w.abv}</div>
+     <div class="tags">${w.notes.slice(0,4).map(n=>`<span class="tag">${n}</span>`).join("")}</div>
+   </div>
+ </article>`).join(""):`<div class="empty">검색 조건에 맞는 위스키가 없습니다.</div>`;
+}
+function openDetail(id){
+ const w=whiskies.find(x=>x.id===id);
+ document.getElementById("detail").innerHTML=`
+ <div class="modal-head">
+   <div class="modal-title"><h2>${w.name}</h2><p>${w.country} · ${w.region} · ${w.type}</p></div>
+   <button class="close" onclick="detailDialog.close()">✕</button>
+ </div>
+ <div class="modal-body">
+   <div class="detail-grid">
+     <div class="info-box"><span>산지</span><b>${w.region}</b></div>
+     <div class="info-box"><span>알코올 도수</span><b>${w.abv}</b></div>
+     <div class="info-box"><span>예상 가격</span><b>${w.price}</b></div>
+     <div class="info-box"><span>설립</span><b>${w.founded}</b></div>
+   </div>
+   <div class="section"><h3>특징과 테이스팅 노트</h3><p>${w.character}</p>
+     <div class="tags">${w.notes.map(n=>`<span class="tag">${n}</span>`).join("")}</div>
+   </div>
+   <div class="section"><h3>주요 빈티지 및 종류</h3>
+     <div class="variants">${w.variants.map(v=>`<div class="variant"><b>${v[0]}</b><span>${v[1]}</span></div>`).join("")}</div>
+     <p>대표 라인업: ${w.years.join(" · ")}</p>
+   </div>
+   <div class="section"><h3>이름의 어원</h3><p>${w.origin}</p></div>
+   <div class="section"><h3>주요 역사</h3><p>${w.history}</p></div>
+   <div class="section"><h3>영화·미술·문학 등 문화예술과의 연관</h3><p>${w.culture}</p></div>
+   <div class="taste-panel">
+     <div><b>이 위스키를 마셔본 적이 있나요?</b><div class="sub">선택 내용은 이 브라우저에 저장됩니다.</div></div>
+     <button class="${tasted[w.id]?'':'off'}" onclick="toggleTasted('${w.id}')">${tasted[w.id]?'마셔봄 ✓':'아직 안 마셔봄'}</button>
+   </div>
+   <div class="note">※ 본 목록은 위키피디아의 위스키 브랜드 및 증류소 목록을 바탕으로 정적 수록했습니다. 가격·도수·라인업은 제품과 시점에 따라 달라질 수 있습니다.</div>
+ </div>`;
+ document.getElementById("detailDialog").showModal();
+}
+function toggleTasted(id){
+ tasted[id]=!tasted[id];
+ localStorage.setItem("whiskyTasted",JSON.stringify(tasted));
+ openDetail(id); render();
+}
+document.getElementById("detailDialog").addEventListener("click",e=>{
+ if(e.target===e.currentTarget)e.currentTarget.close();
+});
+render();
+</script>
+</body>
+</html>
